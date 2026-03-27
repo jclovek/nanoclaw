@@ -3,6 +3,9 @@ import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
+import { Chat } from 'chat';
+import type { Adapter, Thread, Message as ChatMessage } from 'chat';
+
 import {
   ASSISTANT_NAME,
   IDLE_TIMEOUT,
@@ -12,6 +15,10 @@ import {
   TRIGGER_PATTERN,
 } from './config.js';
 import './channels/index.js';
+import {
+  getRegisteredAdapterNames,
+  getChatAdapterFactory,
+} from './channels/chat-adapter-bridge.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
@@ -44,11 +51,12 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { backfillFromRegisteredGroups, recordJidMapping } from './jid-map.js';
+import { send, sendTyping, setLegacyChannels } from './outbound.js';
 import {
-  findChannel,
   formatMessages,
   formatOutbound,
-  formatOutboundForChannel,
+  formatOutboundForAdapter,
 } from './router.js';
 import {
   restoreRemoteControl,
@@ -180,12 +188,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
-  const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-    return true;
-  }
-
   const isMainGroup = group.isMain === true;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
@@ -236,7 +238,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await sendTyping(chatJid);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -247,10 +249,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      const text = formatOutboundForChannel(raw, channel.name);
+      const text = formatOutboundForAdapter(raw, chatJid);
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await send(chatJid, text);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -266,7 +268,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -413,12 +414,6 @@ async function startMessageLoop(): Promise<void> {
           const group = registeredGroups[chatJid];
           if (!group) continue;
 
-          const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-            continue;
-          }
-
           const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
@@ -456,11 +451,9 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
+            sendTyping(chatJid).catch((err) =>
+              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+            );
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -511,10 +504,14 @@ async function main(): Promise<void> {
 
   restoreRemoteControl();
 
+  // Chat SDK instance — assigned after adapter creation, used in shutdown
+  let chatInstance: Chat | null = null;
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
+    if (chatInstance) await chatInstance.shutdown();
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
@@ -536,9 +533,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    const channel = findChannel(channels, chatJid);
-    if (!channel) return;
-
     if (command === '/remote-control') {
       const result = await startRemoteControl(
         msg.sender,
@@ -546,19 +540,16 @@ async function main(): Promise<void> {
         process.cwd(),
       );
       if (result.ok) {
-        await channel.sendMessage(chatJid, result.url);
+        await send(chatJid, result.url);
       } else {
-        await channel.sendMessage(
-          chatJid,
-          `Remote Control failed: ${result.error}`,
-        );
+        await send(chatJid, `Remote Control failed: ${result.error}`);
       }
     } else {
       const result = stopRemoteControl();
       if (result.ok) {
-        await channel.sendMessage(chatJid, 'Remote Control session ended.');
+        await send(chatJid, 'Remote Control session ended.');
       } else {
-        await channel.sendMessage(chatJid, result.error);
+        await send(chatJid, result.error);
       }
     }
   }
@@ -619,8 +610,98 @@ async function main(): Promise<void> {
     channels.push(channel);
     await channel.connect();
   }
-  if (channels.length === 0) {
-    logger.fatal('No channels connected');
+  // --- Chat SDK native integration ---
+  // Create Chat instance with all registered Chat SDK adapters.
+  // Runs alongside legacy channels — both systems coexist via unified send().
+  const chatAdapterMap: Record<string, Adapter> = {};
+  for (const name of getRegisteredAdapterNames()) {
+    const factory = getChatAdapterFactory(name);
+    if (!factory) continue;
+    try {
+      const adapter = factory();
+      if (adapter) {
+        chatAdapterMap[name] = adapter;
+        logger.info({ adapter: name }, 'Chat SDK adapter created');
+      }
+    } catch (err) {
+      logger.warn({ adapter: name, err }, 'Failed to create Chat SDK adapter');
+    }
+  }
+
+  if (Object.keys(chatAdapterMap).length > 0) {
+    const { SqliteStateAdapter } = await import('./state-sqlite.js');
+    const stateAdapter = new SqliteStateAdapter();
+    await stateAdapter.connect();
+
+    chatInstance = new Chat({
+      userName: ASSISTANT_NAME,
+      adapters: chatAdapterMap,
+      state: stateAdapter,
+      onLockConflict: 'force',
+      logger: 'silent',
+    });
+
+    // Inbound handlers: convert Chat SDK messages → NanoClaw pipeline
+    const forwardInbound = (
+      adapterName: string,
+      thread: Thread,
+      message: ChatMessage,
+    ) => {
+      const jid = `csdk:${adapterName}:${thread.id}`;
+      const newMessage: NewMessage = {
+        id: message.id,
+        chat_jid: jid,
+        sender: message.author.userId,
+        sender_name: message.author.fullName || message.author.userName,
+        content: message.text,
+        timestamp: message.metadata.dateSent.toISOString(),
+        is_from_me: message.author.isMe,
+        is_bot_message: message.author.isBot === true || message.author.isMe,
+      };
+      recordJidMapping(jid, adapterName, thread.id);
+      channelOpts.onChatMetadata(jid, newMessage.timestamp, thread.id, 'chat-sdk', true);
+      channelOpts.onMessage(jid, newMessage);
+    };
+
+    chatInstance.onNewMention(async (thread, message) => {
+      const adapterName = thread.id.split(':')[0];
+      forwardInbound(adapterName, thread, message);
+      await thread.subscribe();
+    });
+
+    chatInstance.onDirectMessage(async (thread, message) => {
+      const adapterName = thread.id.split(':')[0];
+      forwardInbound(adapterName, thread, message);
+      await thread.subscribe();
+    });
+
+    chatInstance.onSubscribedMessage(async (thread, message) => {
+      const adapterName = thread.id.split(':')[0];
+      forwardInbound(adapterName, thread, message);
+    });
+
+    chatInstance.onNewMessage(/./, async (thread, message) => {
+      const adapterName = thread.id.split(':')[0];
+      forwardInbound(adapterName, thread, message);
+      await thread.subscribe();
+    });
+
+    await chatInstance.initialize();
+    chatInstance.registerSingleton();
+    logger.info(
+      { adapters: Object.keys(chatAdapterMap) },
+      'Chat SDK initialized',
+    );
+  }
+
+  // Register legacy channels for outbound fallback
+  setLegacyChannels(channels);
+
+  // Backfill JID map for existing registered groups
+  backfillFromRegisteredGroups(registeredGroups);
+
+  if (channels.length === 0 && !chatInstance) {
+    logger.fatal('No channels or Chat SDK adapters connected');
     process.exit(1);
   }
 
@@ -632,21 +713,12 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
-      }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await send(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
-    },
+    sendMessage: (jid, text) => send(jid, text),
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {

@@ -1,6 +1,7 @@
 import { Channel, NewMessage } from './types.js';
 import { parseMarkdown, toPlainText } from './chat-sdk.js';
 import { formatLocalTime } from './timezone.js';
+import { resolveJid } from './jid-map.js';
 
 export function escapeXml(s: string): string {
   if (!s) return '';
@@ -38,6 +39,7 @@ export function formatOutbound(rawText: string): string {
 /**
  * Channel-aware outbound formatter.
  * Strips internal tags and normalizes markdown per channel capability.
+ * @deprecated Use formatOutboundForAdapter instead.
  */
 export function formatOutboundForChannel(
   rawText: string,
@@ -46,12 +48,35 @@ export function formatOutboundForChannel(
   const text = stripInternalTags(rawText);
   if (!text) return '';
 
-  // WhatsApp (Baileys) has limited markdown — convert to plain text
   if (channelName === 'whatsapp') {
     return toPlainText(parseMarkdown(text));
   }
 
-  // Telegram, Slack, Discord, etc. handle markdown natively
+  return text;
+}
+
+/**
+ * Adapter-aware outbound formatter.
+ * Strips internal tags. For Chat SDK adapters, passes through markdown
+ * (adapter handles conversion via { markdown } in thread.post).
+ * For native WhatsApp (Baileys), converts to plain text.
+ */
+export function formatOutboundForAdapter(
+  rawText: string,
+  jid: string,
+): string {
+  const text = stripInternalTags(rawText);
+  if (!text) return '';
+
+  // Chat SDK adapters handle markdown conversion themselves
+  const mapping = resolveJid(jid);
+  if (mapping) return text;
+
+  // Legacy WhatsApp channel: strip markdown to plain text
+  if (jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net')) {
+    return toPlainText(parseMarkdown(text));
+  }
+
   return text;
 }
 

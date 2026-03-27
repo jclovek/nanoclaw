@@ -12,7 +12,12 @@ import { createMemoryState } from '@chat-adapter/state-memory';
 
 import { ASSISTANT_NAME } from '../config.js';
 import { logger } from '../logger.js';
-import { Channel, NewMessage, OnChatMetadata, OnInboundMessage } from '../types.js';
+import {
+  Channel,
+  NewMessage,
+  OnChatMetadata,
+  OnInboundMessage,
+} from '../types.js';
 import { ChannelOpts, registerChannel } from './registry.js';
 
 // --- Adapter registration ---
@@ -32,6 +37,18 @@ export function registerChatAdapter(
   factory: AdapterFactory,
 ): void {
   adapterFactories.set(name, factory);
+}
+
+/** Get all registered adapter factory names. */
+export function getRegisteredAdapterNames(): string[] {
+  return [...adapterFactories.keys()];
+}
+
+/** Get an adapter factory by name. */
+export function getChatAdapterFactory(
+  name: string,
+): AdapterFactory | undefined {
+  return adapterFactories.get(name);
 }
 
 // --- JID ↔ threadId mapping ---
@@ -78,8 +95,7 @@ function convertMessage(
     content: message.text,
     timestamp: message.metadata.dateSent.toISOString(),
     is_from_me: message.author.isMe,
-    is_bot_message:
-      message.author.isBot === true || message.author.isMe,
+    is_bot_message: message.author.isBot === true || message.author.isMe,
   };
 
   return { jid, newMessage };
@@ -95,10 +111,7 @@ class ChatSdkChannel implements Channel {
   private onMessage: OnInboundMessage;
   private onChatMetadata: OnChatMetadata;
 
-  constructor(
-    adapters: Map<string, Adapter>,
-    opts: ChannelOpts,
-  ) {
+  constructor(adapters: Map<string, Adapter>, opts: ChannelOpts) {
     this.adapters = adapters;
     this.onMessage = opts.onMessage;
     this.onChatMetadata = opts.onChatMetadata;
@@ -140,7 +153,13 @@ class ChatSdkChannel implements Channel {
 
       // Notify NanoClaw of the chat metadata
       const chatName = thread.id; // Best we have without platform-specific logic
-      this.onChatMetadata(jid, newMessage.timestamp, chatName, 'chat-sdk', true);
+      this.onChatMetadata(
+        jid,
+        newMessage.timestamp,
+        chatName,
+        'chat-sdk',
+        true,
+      );
 
       // Forward the message
       this.onMessage(jid, newMessage);

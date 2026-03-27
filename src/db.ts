@@ -82,6 +82,35 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    -- Chat SDK state tables
+    CREATE TABLE IF NOT EXISTS chat_sdk_kv (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      expires_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS chat_sdk_subscriptions (
+      thread_id TEXT PRIMARY KEY,
+      subscribed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS chat_sdk_locks (
+      thread_id TEXT PRIMARY KEY,
+      token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chat_sdk_lists (
+      key TEXT NOT NULL,
+      idx INTEGER NOT NULL,
+      value TEXT NOT NULL,
+      expires_at INTEGER,
+      PRIMARY KEY (key, idx)
+    );
+    CREATE TABLE IF NOT EXISTS jid_adapter_map (
+      jid TEXT PRIMARY KEY,
+      adapter_name TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -139,6 +168,11 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+}
+
+/** Get the raw database handle. Used by modules that need direct SQL access (e.g. StateAdapter). */
+export function getDatabase(): Database.Database {
+  return db;
 }
 
 export function initDatabase(): void {
