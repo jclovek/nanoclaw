@@ -9,6 +9,7 @@ import {
   getTriggerPattern,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
@@ -33,6 +34,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -110,6 +112,20 @@ function loadState(): void {
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
   );
+}
+
+/**
+ * Recover a message cursor for a group when lastAgentTimestamp is missing.
+ * Uses the last bot reply as proof of what we've already seen.
+ * Returns undefined if no recovery is possible (truly new group).
+ */
+function recoverCursor(chatJid: string): string | undefined {
+  const botTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
+  if (botTs) {
+    logger.info({ chatJid, recoveredFrom: botTs }, 'Recovered message cursor from last bot reply');
+    return botTs;
+  }
+  return undefined;
 }
 
 function saveState(): void {
@@ -205,11 +221,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
+  let sinceTimestamp = lastAgentTimestamp[chatJid];
+  if (!sinceTimestamp) {
+    sinceTimestamp = recoverCursor(chatJid) ?? '';
+    if (sinceTimestamp) {
+      lastAgentTimestamp[chatJid] = sinceTimestamp;
+      saveState();
+    }
+  }
   const missedMessages = getMessagesSince(
     chatJid,
     sinceTimestamp,
     ASSISTANT_NAME,
+    MAX_MESSAGES_PER_PROMPT,
   );
 
   if (missedMessages.length === 0) return true;
@@ -458,10 +482,19 @@ async function startMessageLoop(): Promise<void> {
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
+          let pipeCursor = lastAgentTimestamp[chatJid];
+          if (!pipeCursor) {
+            pipeCursor = recoverCursor(chatJid) ?? '';
+            if (pipeCursor) {
+              lastAgentTimestamp[chatJid] = pipeCursor;
+              saveState();
+            }
+          }
           const allPending = getMessagesSince(
             chatJid,
-            lastAgentTimestamp[chatJid] || '',
+            pipeCursor,
             ASSISTANT_NAME,
+            MAX_MESSAGES_PER_PROMPT,
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -500,8 +533,20 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+    let sinceTimestamp = lastAgentTimestamp[chatJid];
+    if (!sinceTimestamp) {
+      sinceTimestamp = recoverCursor(chatJid) ?? '';
+      if (sinceTimestamp) {
+        lastAgentTimestamp[chatJid] = sinceTimestamp;
+        saveState();
+      }
+    }
+    const pending = getMessagesSince(
+      chatJid,
+      sinceTimestamp,
+      ASSISTANT_NAME,
+      MAX_MESSAGES_PER_PROMPT,
+    );
     if (pending.length > 0) {
       logger.info(
         { group: group.name, pendingCount: pending.length },
