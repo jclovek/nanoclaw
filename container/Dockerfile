@@ -3,6 +3,10 @@
 
 FROM node:22-slim
 
+# Workaround for hash sum mismatch in Colima/VM network stacks
+RUN echo 'Acquire::http::Pipeline-Depth "0";' > /etc/apt/apt.conf.d/99fix-hashsum && \
+    echo 'Acquire::http::No-Cache=True;' >> /etc/apt/apt.conf.d/99fix-hashsum
+
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
     chromium \
