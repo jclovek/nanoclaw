@@ -36,22 +36,42 @@ const baileysLogger = {
     return baileysLogger;
   },
   trace(obj: unknown, msg?: string) {
-    if (msg) logger.debug(typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {}, msg);
+    if (msg)
+      logger.debug(
+        typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {},
+        msg,
+      );
   },
   debug(obj: unknown, msg?: string) {
-    if (msg) logger.debug(typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {}, msg);
+    if (msg)
+      logger.debug(
+        typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {},
+        msg,
+      );
     else if (typeof obj === 'string') logger.debug(obj);
   },
   info(obj: unknown, msg?: string) {
-    if (msg) logger.info(typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {}, msg);
+    if (msg)
+      logger.info(
+        typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {},
+        msg,
+      );
     else if (typeof obj === 'string') logger.info(obj);
   },
   warn(obj: unknown, msg?: string) {
-    if (msg) logger.warn(typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {}, msg);
+    if (msg)
+      logger.warn(
+        typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {},
+        msg,
+      );
     else if (typeof obj === 'string') logger.warn(obj);
   },
   error(obj: unknown, msg?: string) {
-    if (msg) logger.error(typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {}, msg);
+    if (msg)
+      logger.error(
+        typeof obj === 'object' && obj ? (obj as Record<string, unknown>) : {},
+        msg,
+      );
     else if (typeof obj === 'string') logger.error(obj);
   },
 };

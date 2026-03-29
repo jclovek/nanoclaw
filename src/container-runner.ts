@@ -28,6 +28,13 @@ import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
+// OneCLI SDK writes CA certs to os.tmpdir() which on macOS is /var/folders/...
+// Colima VMs can't access /var/folders, so redirect to a project-local temp dir
+// that is mounted in the VM.
+const onecliTmpDir = path.join(DATA_DIR, 'tmp');
+fs.mkdirSync(onecliTmpDir, { recursive: true });
+process.env.TMPDIR = onecliTmpDir;
+
 const onecli = new OneCLI({ url: ONECLI_URL });
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -78,16 +85,9 @@ function buildVolumeMounts(
       readonly: true,
     });
 
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the OneCLI gateway, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
+    // Note: .env shadow mount removed — OneCLI gateway handles credential
+    // injection so .env no longer contains secrets worth hiding. The previous
+    // /dev/null overlay caused Docker failures when /workspace/project is :ro.
 
     // Main also gets its group folder as the working directory
     mounts.push({
