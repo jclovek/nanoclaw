@@ -202,6 +202,10 @@ function buildVolumeMounts(
         fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
     if (needsCopy) {
       fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      // Ensure files are world-readable so the container's node user can access them
+      for (const entry of fs.readdirSync(groupAgentRunnerDir)) {
+        fs.chmodSync(path.join(groupAgentRunnerDir, entry), 0o644);
+      }
     }
   }
   mounts.push({
